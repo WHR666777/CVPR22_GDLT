@@ -39,9 +39,7 @@ class GDLT(nn.Module):
         )
 
         self.prototype = nn.Embedding(n_query, hidden_dim)
-
-        self.weight = torch.linspace(0, 1, n_query, requires_grad=False).cuda()
-        print(self.weight)
+        self.register_buffer('weight', torch.linspace(0, 1, n_query))
         self.regressor = nn.Linear(hidden_dim, n_query)
 
     def forward(self, x):
@@ -57,6 +55,6 @@ class GDLT(nn.Module):
         s = torch.diagonal(s, dim1=-2, dim2=-1)  # (b, n)
         norm_s = torch.sigmoid(s)
         norm_s = norm_s / torch.sum(norm_s, dim=1, keepdim=True)
-        out = torch.sum(self.weight.unsqueeze(0).repeat(b, 1) * norm_s, dim=1)
+        out = torch.sum(self.weight.unsqueeze(0).expand(b, -1) * norm_s, dim=1)
 
         return {'output': out, 'embed': q1}

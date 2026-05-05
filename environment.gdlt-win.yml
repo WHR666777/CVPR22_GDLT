@@ -1,0 +1,16 @@
+name: gdlt-win
+channels:
+  - pytorch
+  - nvidia
+  - defaults
+dependencies:
+  - python=3.10
+  - pytorch=2.5.1
+  - torchvision=0.20.1
+  - torchaudio=2.5.1
+  - pytorch-cuda=12.4
+  - pip
+  - pip:
+      - numpy==1.26.4
+      - scipy==1.13.1
+      - tensorboardX

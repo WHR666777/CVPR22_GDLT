@@ -1,15 +1,20 @@
 import torch
 import numpy as np
 import options
-from datasets import RGDataset
+from datasets import AQADataset
 from torch.utils.data import DataLoader
-from tensorboardX import SummaryWriter
 from models import model, loss
 import os
-from torch import nn
 
 import train
 from test import test_epoch
+
+try:
+    from tensorboardX import SummaryWriter
+except ImportError as exc:
+    raise ImportError(
+        "tensorboardX is required. Install it with 'pip install tensorboardX' in your conda environment."
+    ) from exc
 
 
 def setup_seed(seed):
@@ -48,10 +53,77 @@ def get_scheduler(optim, args):
     return scheduler
 
 
+def resolve_device(device_arg):
+    if device_arg == 'auto':
+        return torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    if device_arg == 'cuda':
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA was requested via --device cuda, but no CUDA device is available.")
+        return torch.device('cuda')
+    if device_arg == 'cpu':
+        return torch.device('cpu')
+    raise ValueError("Unsupported device '{}'. Use auto/cuda/cpu.".format(device_arg))
+
+
+def ensure_path(path, description):
+    if not os.path.exists(path):
+        raise FileNotFoundError("{} not found: {}".format(description, path))
+
+
+def apply_paper_defaults(args):
+    dataset = args.dataset.lower()
+
+    if dataset == 'fisv':
+        if args.clip_num is None:
+            args.clip_num = 124
+        if args.dropout is None:
+            args.dropout = 0.7
+        if args.score_key.upper() == 'PCS':
+            if args.epoch is None:
+                args.epoch = 400
+        else:
+            if args.epoch is None:
+                args.epoch = 320
+        # In the paper, lambda in Eq. (11) is 0.5 for Fis-V.
+        if args.alpha is None:
+            args.alpha = 0.5
+    elif dataset == 'rg':
+        if args.clip_num is None:
+            args.clip_num = 68
+        if args.dropout is None:
+            args.dropout = 0.3
+        if args.epoch is None:
+            epoch_map = {
+                'Ball': 250,
+                'Clubs': 400,
+                'Hoop': 500,
+                'Ribbon': 150,
+            }
+            if args.action_type not in epoch_map:
+                raise ValueError(
+                    "For RG, action_type must be one of {} to match the paper defaults.".format(
+                        list(epoch_map.keys())
+                    )
+                )
+            args.epoch = epoch_map[args.action_type]
+        # In the paper, lambda in Eq. (11) is 1.0 for RG.
+        if args.alpha is None:
+            args.alpha = 1.0
+    else:
+        raise ValueError("Unsupported dataset '{}'".format(args.dataset))
+
+    return args
+
+
 if __name__ == '__main__':
     args = options.parser.parse_args()
+    args = apply_paper_defaults(args)
     setup_seed(0)
-    device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+    device = resolve_device(args.device)
+
+    ensure_path(args.video_path, "Feature directory")
+    ensure_path(args.train_label_path, "Training label file")
+    ensure_path(args.test_label_path, "Test label file")
 
     '''
     1. load data
@@ -59,19 +131,45 @@ if __name__ == '__main__':
     '''
     train data
     '''
-    train_data = RGDataset(args.video_path, args.train_label_path, clip_num=args.clip_num,
-                           action_type=args.action_type)
-    train_loader = DataLoader(train_data, batch_size=args.batch, shuffle=True, num_workers=8)
+    train_data = AQADataset(
+        args.video_path,
+        args.train_label_path,
+        clip_num=args.clip_num,
+        action_type=args.action_type,
+        score_key=args.score_key,
+        score_max=args.score_max,
+        dataset=args.dataset,
+    )
+    train_loader = DataLoader(
+        train_data,
+        batch_size=args.batch,
+        shuffle=True,
+        num_workers=args.num_workers,
+        pin_memory=device.type == 'cuda',
+    )
     print(len(train_data))
-    # print(train_data.get_score_mean(), train_data.get_score_std())
-    # raise SystemExit
 
     '''
     test data
     '''
-    test_data = RGDataset(args.video_path, args.test_label_path, clip_num=args.clip_num,
-                          action_type=args.action_type, train=False)
-    test_loader = DataLoader(test_data, batch_size=1, shuffle=False, num_workers=8)
+    test_data = AQADataset(
+        args.video_path,
+        args.test_label_path,
+        clip_num=args.clip_num,
+        action_type=args.action_type,
+        score_key=args.score_key,
+        score_max=train_data.score_max,
+        dataset=args.dataset,
+        train=False,
+    )
+    test_loader = DataLoader(
+        test_data,
+        batch_size=1,
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=device.type == 'cuda',
+    )
+    print("Resolved score_max: {:.4f}".format(train_data.score_max))
     print('=============Load dataset successfully=============')
 
     '''
@@ -82,7 +180,9 @@ if __name__ == '__main__':
     loss_fn = loss.LossFun(args.alpha, args.margin)
     train_fn = train.train_epoch
     if args.ckpt is not None:
-        checkpoint = torch.load('./ckpt/' + args.ckpt + '.pkl')
+        ckpt_path = os.path.join('./ckpt', args.ckpt + '.pkl')
+        ensure_path(ckpt_path, "Checkpoint")
+        checkpoint = torch.load(ckpt_path, map_location=device)
         model.load_state_dict(checkpoint)
     print('=============Load model successfully=============')
 
